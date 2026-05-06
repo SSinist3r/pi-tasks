@@ -149,7 +149,7 @@ export class TaskWidget {
       this.widgetInterval = setInterval(() => {
         this.widgetFrame++;
         if (this.tui) this.tui.requestRender();
-      }, 80);
+      }, 150);
     }
   }
 

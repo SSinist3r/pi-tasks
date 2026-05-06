@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { AutoClearManager } from "./auto-clear.js";
 import { ProcessTracker } from "./process-tracker.js";
 import {
@@ -277,9 +277,32 @@ export default function (pi: ExtensionAPI) {
   checkSubagentsVersion();
   const unsubReady = pi.events.on("subagents:ready", () => checkSubagentsVersion());
 
-  /** Build a prompt for a task being executed by a subagent. */
-  function buildTaskPrompt(task: { id: string; subject: string; description: string }, additionalContext?: string): string {
+  /** Build a prompt for a task being executed by a subagent.
+   *  Injects completed dependency results so cascaded agents have context from prerequisites.
+   */
+  function buildTaskPrompt(
+    task: { id: string; subject: string; description: string; blockedBy?: string[] },
+    additionalContext?: string,
+  ): string {
     let prompt = `You are executing task #${task.id}: "${task.subject}"\n\n${task.description}`;
+
+    // Inject completed dependency results so cascaded agents have full context
+    if (task.blockedBy && task.blockedBy.length > 0) {
+      const depResults: string[] = [];
+      for (const depId of task.blockedBy) {
+        const dep = store.get(depId);
+        if (dep?.metadata?.result) {
+          const result = dep.metadata.result.length > 4000
+            ? dep.metadata.result.slice(0, 4000) + "\n\n[... truncated — use TaskGet for full output]"
+            : dep.metadata.result;
+          depResults.push(`### Task #${depId}: ${dep.subject}\n${result}`);
+        }
+      }
+      if (depResults.length > 0) {
+        prompt += `\n\n## Prerequisite task results\n\n${depResults.join("\n\n")}`;
+      }
+    }
+
     if (additionalContext) prompt += `\n\n${additionalContext}`;
     prompt += `\n\nComplete this task fully. Do not attempt to manage tasks yourself.`;
     return prompt;
@@ -658,17 +681,6 @@ export default function (pi: ExtensionAPI) {
     showPersistedTasks();
   });
 
-  pi.on("session_fork", async (_event, ctx) => {
-    latestCtx = ctx;
-    widget.setUICtx(ctx.ui as UICtx);
-    storeUpgraded = false;
-    persistedTasksShown = false;
-    preservePersistedTasksOnShow = true;
-    widget.resetActivity();
-    upgradeStoreIfNeeded(ctx);
-    showPersistedTasks();
-  });
-
   pi.on("session_tree", async (_event, ctx) => {
     latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
@@ -947,10 +959,8 @@ Returns full task details:
 
   const taskUpdateFieldSchema = {
     status: Type.Optional(Type.Unsafe<"pending" | "in_progress" | "completed" | "skipped" | "deleted">({
-      anyOf: [
-        { type: "string", enum: ["pending", "in_progress", "completed", "skipped"] },
-        { type: "string", const: "deleted" },
-      ],
+      type: "string",
+      enum: ["pending", "in_progress", "completed", "skipped", "deleted"],
       description: "New status for the task",
     })),
     subject: Type.Optional(Type.String({ description: "New subject for the task" })),
